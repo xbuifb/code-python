@@ -11,9 +11,11 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import websockets
 from websockets.asyncio.server import Server as WSServer, ServerConnection
@@ -69,7 +71,7 @@ class RemoteServer:
         providers: list[ProviderConfig],
         mcp_servers: list[MCPServerConfig] | None = None,
         hook_engine: HookEngine | None = None,
-        addr: str = "0.0.0.0",
+        addr: str = "127.0.0.1",
         port: int = 18888,
         config: object | None = None,
     ) -> None:
@@ -79,6 +81,9 @@ class RemoteServer:
         self.hook_engine = hook_engine
         self.addr = addr
         self.port = port
+        # R1 鉴权：每次启动生成一次性 token，握手时必须 ?token=xxx 校验通过。
+        # 绑 127.0.0.1 默认仅本机可连，token 防止同机其他进程/浏览器误连或越权。
+        self._auth_token = secrets.token_urlsafe(32)
 
         # WebSocket 连接池（支持多客户端广播）
         self._connections: set[ServerConnection] = set()
@@ -122,7 +127,8 @@ class RemoteServer:
         # 初始化 MCP（如果有配置）
         await self._init_mcp()
 
-        print(f"\n  Remote UI: http://localhost:{self.port}\n")
+        print(f"\n  Remote UI: http://localhost:{self.port}/?token={self._auth_token}")
+        print(f"  鉴权 token 已生成，浏览器需用上述完整 URL 访问（含 ?token=）\n")
 
         # websockets 的 serve 支持 process_request 回调来处理普通 HTTP
         async with websockets.serve(
@@ -139,22 +145,56 @@ class RemoteServer:
     # HTTP 请求处理（为 / 路径提供前端 HTML）
     # ------------------------------------------------------------------
 
+    def _check_token(self, request_path: str) -> bool:
+        """校验请求 URL 中的 ?token= 是否匹配本会话 token。
+
+        用 compare_digest 常数时间比较，避免计时侧信道。request_path
+        形如 "/ws?token=xxx" 或 "/"。
+        """
+        query = urlparse(request_path).query
+        if not query:
+            return False
+        provided = parse_qs(query).get("token", [""])[0]
+        if not provided:
+            return False
+        return secrets.compare_digest(provided, self._auth_token)
+
     def _process_http_request(
         self, connection: ServerConnection, request: Request
     ) -> Response | None:
-        """拦截 HTTP 请求，对 / 路径返回 HTML 页面。
+        """拦截 HTTP 请求，对 / 路径返回 HTML 页面，对 /ws 校验 token。
         返回 None 表示继续走 WebSocket 升级流程。
+
+        R1：/ 与 /ws 均需 ?token= 校验通过；无 token 或不匹配返回 401，
+        阻止未授权访问前端页面和控制通道。
         """
-        if request.path == "/":
+        parsed_path = urlparse(request.path).path
+        authorized = self._check_token(request.path)
+
+        if parsed_path == "/":
+            if not authorized:
+                return Response(
+                    401,
+                    "Unauthorized",
+                    websockets.Headers({"Content-Type": "text/plain; charset=utf-8"}),
+                    "401 Unauthorized: 缺少或错误 token".encode("utf-8"),
+                )
             return Response(
                 200,
                 "OK",
                 websockets.Headers({"Content-Type": "text/html; charset=utf-8"}),
                 INDEX_HTML.encode("utf-8"),
             )
-        if request.path != "/ws":
+        if parsed_path != "/ws":
             return Response(404, "Not Found", websockets.Headers(), b"404 Not Found")
-        # /ws 路径 → 继续 WebSocket 升级
+        # /ws 路径 → token 通过才继续 WebSocket 升级，否则拒绝握手
+        if not authorized:
+            return Response(
+                401,
+                "Unauthorized",
+                websockets.Headers({"Content-Type": "text/plain; charset=utf-8"}),
+                "401 Unauthorized: 缺少或错误 token".encode("utf-8"),
+            )
         return None
 
     # ------------------------------------------------------------------

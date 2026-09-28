@@ -251,7 +251,8 @@ function connect() {
   if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
   if (ws) { try { ws.onclose = null; ws.close(); } catch(e) {} ws = null; }
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  // R1：透传页面 URL 的 ?token= 到 WS 握手，服务端 _process_http_request 校验。
+  ws = new WebSocket(proto + '//' + location.host + '/ws' + location.search);
 
   ws.onopen = () => {
     connStatus.innerHTML = '<span class="dot connected"></span>Connected';

@@ -54,7 +54,7 @@ def main() -> None:
         "--remote",
         action="store_true",
         default=False,
-        help="Start in remote mode: WebSocket server on 0.0.0.0:18888 with browser UI",
+        help="Start in remote mode: token-protected WebSocket server on 127.0.0.1:18888 with browser UI",
     )
     args = parser.parse_args()
 
