@@ -40,6 +40,9 @@ class TeamManager:
         self._worktree_manager = worktree_manager
         self._trace_manager = trace_manager
         self._teammate_team_map: dict[str, str] = {}  # agent_id -> team_name
+        # cost_report 邮箱消息合并的目标账本。由 TUI/-p/remote 启动点注入。
+        # None 时 cost_report 消息被丢弃（worker 仍能回传，但 lead 端不聚合）。
+        self._cost_ledger_sink: Any = None
 
     def detect_backend(
         self,
@@ -252,6 +255,13 @@ class TeamManager:
         return None
 
 
+    def register_cost_ledger_sink(self, ledger: Any) -> None:
+        """注入主 Agent 的 cost_ledger，用于接收 worker 回传的 cost_report。
+
+        可以在 Agent 启动后任意时刻调用，drain_lead_mailbox 会用最新值。
+        """
+        self._cost_ledger_sink = ledger
+
     def drain_lead_mailbox(self) -> list[str]:
         notes: list[str] = []
         for team_name in list(self._teams.keys()):
@@ -266,10 +276,34 @@ class TeamManager:
                 continue
             parts = [f'<team-notification team="{team_name}">']
             for m in msgs:
+                # cost_report 是结构化观测消息，绝不能塞进 LLM context。
+                # sink 未注入时也跳过 notes（避免 LLM 看到 JSON 字符串）。
+                if m.type == "cost_report":
+                    self._merge_cost_report(m)
+                    continue
                 parts.append(f"from={m.from_agent}: {m.text}")
             parts.append("</team-notification>")
             notes.append("\n".join(parts))
         return notes
+
+    def _merge_cost_report(self, msg: Any) -> None:
+        """把 worker 回传的 cost_report 反序列化后合并到主 ledger。
+
+        sink 未注入 / 反序列化失败一律 swallow：观测聚合不能让 LLM
+        看到坏数据，也不能因 cost 解析失败中断 team 通知。
+        """
+        if self._cost_ledger_sink is None:
+            return
+        try:
+            from mewcode.cost.ledger import CostLedger
+            records = CostLedger.from_json(msg.text)
+            self._cost_ledger_sink.extend(records)
+            log.info(
+                "合并 worker %s 回传 %d 条成本记录",
+                msg.from_agent, len(records),
+            )
+        except Exception as e:
+            log.warning("cost_report 合并失败（来自 %s）: %s", msg.from_agent, e)
 
     def get_all_teammate_progress(self) -> list[TeammateProgress]:
         """Collect progress objects attached to every registered teammate."""

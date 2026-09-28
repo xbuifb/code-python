@@ -90,6 +90,17 @@ def _load_user_pricing() -> dict[str, Price]:
 _PRICING_TABLE: dict[str, Price] = {**_DEFAULT_PRICING, **_load_user_pricing()}
 
 
+def reload_pricing() -> int:
+    """运行时重新加载 ~/.mewcode/pricing.yaml 并合并到当前 _PRICING_TABLE。
+
+    用于 /cost reload 子命令：用户改完 yaml 后不必重启 Agent。
+    返回合并后价格表的总条目数，供命令回显。
+    """
+    global _PRICING_TABLE
+    _PRICING_TABLE = {**_DEFAULT_PRICING, **_load_user_pricing()}
+    return len(_PRICING_TABLE)
+
+
 def price_for(model: str) -> Price | None:
     """按精确名查表；不匹配返回 None（最小闭环不做模糊匹配 fallback）。"""
     return _PRICING_TABLE.get(model)

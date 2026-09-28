@@ -221,6 +221,17 @@ class StreamCollector:
 # tool 批量执行
 # ---------------------------------------------------------------------------
 
+def _extract_last_tool_name(response: LLMResponse) -> str | None:
+    """从 LLM 响应里提取最后一个 tool call 的 name，用于 /cost by-tool 分桶。
+
+    没有任何 tool call（纯文本回复）返回 None。提取逻辑简单一致：
+    取 response.tool_calls 的最后一个的 tool_name 字段。
+    """
+    if not response.tool_calls:
+        return None
+    return response.tool_calls[-1].tool_name
+
+
 @dataclass
 class ToolBatch:
     concurrent: bool
@@ -615,6 +626,7 @@ class Agent:
                     ttft_ms=((first_chunk_perf - t0) * 1000) if first_chunk_perf is not None else 0.0,
                     duration_ms=(t1 - t0) * 1000,
                     agent_id=self.agent_id,
+                    tool_name=_extract_last_tool_name(response),
                 ))
             except (AttributeError, TypeError, ValueError) as e:
                 # 观测不能阻断主流程，但必须留痕，否则静默失败比不观测更糟
@@ -1154,6 +1166,7 @@ class Agent:
                     ttft_ms=((first_chunk_perf - t0) * 1000) if first_chunk_perf is not None else 0.0,
                     duration_ms=(t1 - t0) * 1000,
                     agent_id=self.agent_id,
+                    tool_name=_extract_last_tool_name(response),
                 ))
             except (AttributeError, TypeError, ValueError) as e:
                 logging.getLogger(__name__).warning(

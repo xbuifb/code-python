@@ -69,3 +69,14 @@ def test_compute_cost_gpt4o_cache_read():
     r = _record("gpt-4o", inp=1000, out=0, cr=500)
     p = price_for("gpt-4o")
     assert compute_cost(r, p) == pytest.approx(0.003125)
+
+
+def test_reload_pricing_returns_count_and_keeps_built_in():
+    """reload_pricing() 应返回条目数，且内置表条目仍可查到。"""
+    from mewcode.cost.pricing import reload_pricing
+
+    count = reload_pricing()
+    assert count > 0
+    # 内置表条目不受 reload 影响
+    assert price_for("claude-3-5-sonnet") is not None
+    assert price_for("gpt-4o") is not None

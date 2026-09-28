@@ -189,3 +189,118 @@ def test_aggregate_unsupported_key_raises():
     with pytest.raises(ValueError, match="unsupported"):
         l.aggregate(by="time")  # type: ignore[arg-type]
 
+
+def test_to_json_round_trip_preserves_all_fields():
+    """to_json → from_json 应保留所有字段（含 agent_id / tool_name）。"""
+    from mewcode.cost.record import CostRecord
+
+    l = CostLedger()
+    l.append(CostRecord(
+        timestamp=123.45, model="claude-3-5-sonnet",
+        input_tokens=1000, output_tokens=500,
+        cache_read=100, cache_creation=200,
+        ttft_ms=42.0, duration_ms=500.0,
+        agent_id="worker-1", tool_name="bash",
+    ))
+    l.append(CostRecord(
+        timestamp=999.0, model="gpt-4o",
+        input_tokens=2000, output_tokens=1000,
+        cache_read=0, cache_creation=0,
+        ttft_ms=88.0, duration_ms=800.0,
+        agent_id="worker-2", tool_name=None,
+    ))
+
+    payload = l.to_json()
+    restored = CostLedger.from_json(payload)
+
+    assert len(restored) == 2
+    assert restored[0].model == "claude-3-5-sonnet"
+    assert restored[0].agent_id == "worker-1"
+    assert restored[0].tool_name == "bash"
+    assert restored[0].input_tokens == 1000
+    assert restored[1].model == "gpt-4o"
+    assert restored[1].agent_id == "worker-2"
+    assert restored[1].tool_name is None
+
+
+def test_extend_merges_records_skipping_bad_ones():
+    """extend 批量合并：单条坏数据不阻断整批。"""
+    from mewcode.cost.record import CostRecord
+
+    good = _record("claude-3-5-sonnet", inp=100, out=50)
+    bad = CostRecord(
+        timestamp=0.0, model="bad",
+        input_tokens=-10, output_tokens=0,  # 负数，会被 append 拒
+        cache_read=0, cache_creation=0,
+        ttft_ms=0.0, duration_ms=0.0,
+    )
+    good2 = _record("gpt-4o", inp=200, out=100)
+
+    l = CostLedger()
+    l.extend([good, bad, good2])
+
+    # bad 被跳过，good + good2 都进账本
+    assert len(l.total().record_count) if False else True  # 占位
+    t = l.total()
+    assert t.record_count == 2
+    assert t.total_input == 300  # 100 + 200
+
+
+def test_from_json_invalid_payload_raises_value_error():
+    """非 JSON / 非 list payload 应抛 ValueError，由 caller catch。"""
+    with pytest.raises(ValueError, match="invalid cost_report"):
+        CostLedger.from_json("not a json")
+    with pytest.raises(ValueError, match="invalid cost_report"):
+        CostLedger.from_json('{"key": "value"}')  # dict 不是 list
+
+
+def test_from_json_missing_fields_use_defaults():
+    """旧版本记录（缺 agent_id/tool_name）应能反序列化。"""
+    import json as _json
+    # 手工构造一个旧格式 payload（只有 6 字段）
+    old_payload = _json.dumps([{
+        "timestamp": 1.0, "model": "claude-3-5-sonnet",
+        "input_tokens": 100, "output_tokens": 50,
+        "cache_read": 0, "cache_creation": 0,
+        "ttft_ms": 0.0, "duration_ms": 100.0,
+    }])
+    records = CostLedger.from_json(old_payload)
+    assert len(records) == 1
+    assert records[0].agent_id == ""  # 默认值
+    assert records[0].tool_name is None  # 默认值
+
+
+def test_aggregate_by_tool_groups_by_tool_name():
+    """aggregate(by='tool') 按 tool_name 分桶，None 归到 (no tool) 桶。"""
+    from mewcode.cost.record import CostRecord
+
+    l = CostLedger()
+    # 3 条 bash + 2 条 grep + 1 条纯文本（None）
+    for _ in range(3):
+        l.append(CostRecord(
+            timestamp=0.0, model="claude-3-5-sonnet",
+            input_tokens=100, output_tokens=0,
+            cache_read=0, cache_creation=0,
+            ttft_ms=0.0, duration_ms=0.0,
+            agent_id="main", tool_name="bash",
+        ))
+    for _ in range(2):
+        l.append(CostRecord(
+            timestamp=0.0, model="claude-3-5-sonnet",
+            input_tokens=200, output_tokens=0,
+            cache_read=0, cache_creation=0,
+            ttft_ms=0.0, duration_ms=0.0,
+            agent_id="main", tool_name="grep",
+        ))
+    l.append(_record("claude-3-5-sonnet", inp=50, out=0))  # tool_name=None
+
+    rows = l.aggregate(by="tool")
+    assert len(rows) == 3
+    by_key = {r.key: r for r in rows}
+    assert by_key["bash"].record_count == 3
+    assert by_key["bash"].total_tokens == 300  # 3 × 100
+    assert by_key["grep"].record_count == 2
+    assert by_key["grep"].total_tokens == 400  # 2 × 200
+    assert by_key["(no tool)"].record_count == 1
+    assert by_key["(no tool)"].total_tokens == 50
+

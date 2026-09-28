@@ -298,6 +298,8 @@ class RemoteServer:
         self.team_manager = TeamManager(
             worktree_manager=wt_manager, trace_manager=trace_manager
         )
+        # 注入主 Agent cost_ledger 作为 worker cost_report 合并目标
+        self.team_manager.register_cost_ledger_sink(self.agent.cost_ledger)
 
         self.registry.register(AgentTool(
             agent_loader=agent_loader,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Literal
@@ -51,13 +52,67 @@ class CostLedger:
         self._records: list[CostRecord] = []
 
     def append(self, record: CostRecord) -> None:
-        # 防止 SDK 异常返回负数 token 污染聚合。抛 ValueError 会被
-        # agent.py 的 except 收住，主流程不阻断，但 ledger 不收脏数据。
+        # 防御性校验：观测数据污染比丢数据更糟，负数 token 拒收。
         if record.input_tokens < 0 or record.output_tokens < 0:
             raise ValueError(f"negative token count: {record}")
         if record.cache_read < 0 or record.cache_creation < 0:
-            raise ValueError(f"negative cache count: {record}")
+            raise ValueError(f"negative cache token count: {record}")
         self._records.append(record)
+
+    def extend(self, records: list[CostRecord]) -> None:
+        """批量 append，用于跨进程 cost_report 合并。
+
+        单条失败不阻断整批，但会记录 warning，因为观测合并不能因一条坏数据
+        丢掉整组 worker 数据。
+        """
+        import logging
+        log = logging.getLogger(__name__)
+        for r in records:
+            try:
+                self.append(r)
+            except ValueError as e:
+                log.warning("跳过坏记录: %s", e)
+
+    def to_json(self) -> str:
+        """序列化为 JSON 字符串，用于跨进程邮箱传输。"""
+        from dataclasses import asdict
+        return json.dumps(
+            [asdict(r) for r in self._records],
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def from_json(payload: str) -> list[CostRecord]:
+        """反序列化 JSON 字符串为 CostRecord 列表。
+
+        静态方法：不要求 caller 持有 CostLedger 实例，drain_lead_mailbox
+        可以用 CostLedger.from_json(msg.text) 解析。
+        任何解析错误都抛 ValueError，由 caller catch 后跳过这条消息。
+        """
+        try:
+            data = json.loads(payload)
+            if not isinstance(data, list):
+                raise ValueError("payload is not a list")
+            records: list[CostRecord] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                # 容错：缺失字段用默认值，避免旧版本记录反序列化失败
+                records.append(CostRecord(
+                    timestamp=float(item.get("timestamp", 0.0)),
+                    model=str(item.get("model", "")),
+                    input_tokens=int(item.get("input_tokens", 0)),
+                    output_tokens=int(item.get("output_tokens", 0)),
+                    cache_read=int(item.get("cache_read", 0)),
+                    cache_creation=int(item.get("cache_creation", 0)),
+                    ttft_ms=float(item.get("ttft_ms", 0.0)),
+                    duration_ms=float(item.get("duration_ms", 0.0)),
+                    agent_id=str(item.get("agent_id", "")),
+                    tool_name=item.get("tool_name"),
+                ))
+            return records
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            raise ValueError(f"invalid cost_report payload: {e}") from e
 
     def __len__(self) -> int:
         return len(self._records)

@@ -875,6 +875,8 @@ class MewCodeApp(App):
         from mewcode.tools.team_delete import TeamDeleteTool
 
         self.team_manager = TeamManager(worktree_manager=self.worktree_manager, trace_manager=self.trace_manager)
+        # 注入主 Agent cost_ledger 作为 worker cost_report 合并目标
+        self.team_manager.register_cost_ledger_sink(self.agent.cost_ledger)
 
         agent_tool = AgentTool(
             agent_loader=self.agent_loader,

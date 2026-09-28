@@ -200,6 +200,10 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)
     agent_loader.load_all()
     team_manager = TeamManager(worktree_manager=wt_manager, trace_manager=trace_manager)
+    # 注入主 Agent 的 cost_ledger 作为 worker cost_report 的合并目标。
+    # worker 退出前会序列化本地 ledger 写邮箱，drain_lead_mailbox 解出后
+    # extend 到这个 sink，让 -p 模式也能看到子 Agent / teammate 的成本。
+    team_manager.register_cost_ledger_sink(agent.cost_ledger)
 
     agent_tool = AgentTool(
         agent_loader=agent_loader,
@@ -574,6 +578,28 @@ async def _run_teammate(team_name: str, agent_name: str) -> None:
         await handle.task
     except (KeyboardInterrupt, asyncio.CancelledError):
         handle.cancel()
+
+    # worker 退出前把本地 cost_ledger 回传 lead，合并到主 Agent 账本。
+    # 失败一律 swallow：观测回传不能阻断 worker 退出，也不能让 lead 收不到
+    # 后续的 shutdown 确认。
+    try:
+        ledger = getattr(agent, "cost_ledger", None)
+        if ledger is not None and len(ledger) > 0:
+            from datetime import datetime, timezone
+            from mewcode.teams.mailbox import MailboxMessage
+            mailbox.write(
+                team.lead_agent_id,
+                MailboxMessage(
+                    from_agent=agent_name,
+                    text=ledger.to_json(),
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    type="cost_report",
+                ),
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            "worker cost_report 回传失败: %s", e,
+        )
 
 
 if __name__ == "__main__":
