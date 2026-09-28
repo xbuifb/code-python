@@ -20,21 +20,27 @@ class Price:
     cache_creation_per_mtok: float
 
 
-# 最小闭环仅覆盖 Claude 3.5 Sonnet 与 Haiku 两款，按 Anthropic 公开定价表。
-# 找不到模型返回 None，由上层决定如何展示（默认显示「价格未知」）。
+# 覆盖 Anthropic / OpenAI 主流模型，按 2025 年公开定价表（USD / 1M token）。
+# Anthropic cache_read ≈ input × 0.1，cache_creation ≈ input × 1.25。
+# OpenAI 系列 cache_creation 固定 0（自动 prompt caching 不额外收费）。
 _PRICING_TABLE: dict[str, Price] = {
-    "claude-3-5-sonnet": Price(
-        input_per_mtok=3.0,
-        output_per_mtok=15.0,
-        cache_read_per_mtok=0.30,
-        cache_creation_per_mtok=3.75,
-    ),
-    "claude-3-5-haiku": Price(
-        input_per_mtok=0.80,
-        output_per_mtok=4.0,
-        cache_read_per_mtok=0.08,
-        cache_creation_per_mtok=1.0,
-    ),
+    # Anthropic Claude 系列
+    "claude-3-5-sonnet": Price(3.0, 15.0, 0.30, 3.75),
+    "claude-3-5-sonnet-20241022": Price(3.0, 15.0, 0.30, 3.75),
+    "claude-3-5-haiku": Price(0.80, 4.0, 0.08, 1.0),
+    "claude-3-5-haiku-20241022": Price(0.80, 4.0, 0.08, 1.0),
+    "claude-3-opus": Price(15.0, 75.0, 1.50, 18.75),
+    "claude-3-opus-20240229": Price(15.0, 75.0, 1.50, 18.75),
+    "claude-3-haiku": Price(0.25, 1.25, 0.025, 0.3125),
+    "claude-3-sonnet": Price(3.0, 15.0, 0.30, 3.75),
+    # OpenAI 系列（GPT-4o / 4o-mini / 4-turbo）
+    # GPT-4o cache_read = input × 0.5（prompt caching 命中价半价）
+    "gpt-4o": Price(2.50, 10.0, 1.25, 0.0),
+    "gpt-4o-2024-08-06": Price(2.50, 10.0, 1.25, 0.0),
+    "gpt-4o-2024-05-13": Price(5.0, 15.0, 2.50, 0.0),
+    "gpt-4o-mini": Price(0.15, 0.60, 0.075, 0.0),
+    "gpt-4o-mini-2024-07-18": Price(0.15, 0.60, 0.075, 0.0),
+    "gpt-4-turbo": Price(10.0, 30.0, 5.0, 0.0),
 }
 
 

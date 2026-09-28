@@ -42,7 +42,7 @@ def test_append_accumulates_tokens_and_cost():
 def test_unknown_model_makes_total_cost_none():
     l = CostLedger()
     l.append(_record("claude-3-5-sonnet", inp=1000, out=0))
-    l.append(_record("gpt-4o", inp=500, out=0))
+    l.append(_record("gpt-5", inp=500, out=0))  # gpt-5 不在表里
     t = l.total()
     assert t.total_cost is None
 
@@ -99,11 +99,43 @@ def test_cache_hit_rate_clamped_to_unit_interval():
 def test_unknown_models_collected_dedup():
     """价格表外的模型必须被收集进 unknown_models 且去重。"""
     l = CostLedger()
-    l.append(_record("gpt-4o", inp=100, out=0))
-    l.append(_record("gpt-4o", inp=200, out=0))  # 重复，应去重
+    l.append(_record("gpt-5", inp=100, out=0))  # 未知（gpt-5 不在表里）
+    l.append(_record("gpt-5", inp=200, out=0))  # 重复，应去重
     l.append(_record("claude-3-5-sonnet", inp=100, out=0))  # 已知
-    l.append(_record("claude-3-opus", inp=100, out=0))  # 未知
+    l.append(_record("claude-3-opus", inp=100, out=0))  # 已知（扩展后已收录）
     t = l.total()
     assert t.total_cost is None
-    assert t.unknown_models == ["gpt-4o", "claude-3-opus"]
+    assert t.unknown_models == ["gpt-5"]
+
+
+def test_avg_ttft_ms():
+    """平均首 token 延迟 = sum(ttft) / n"""
+    l = CostLedger()
+    l.append(_record("claude-3-5-sonnet", inp=0, out=0, dur=200.0))
+    # _record 默认 ttft=0.0，这里直接构造带 ttft 的 record
+    from mewcode.cost.record import CostRecord
+
+    l.append(CostRecord(
+        timestamp=0.0,
+        model="claude-3-5-sonnet",
+        input_tokens=0,
+        output_tokens=0,
+        cache_read=0,
+        cache_creation=0,
+        ttft_ms=300.0,
+        duration_ms=500.0,
+    ))
+    l.append(CostRecord(
+        timestamp=0.0,
+        model="claude-3-5-sonnet",
+        input_tokens=0,
+        output_tokens=0,
+        cache_read=0,
+        cache_creation=0,
+        ttft_ms=600.0,
+        duration_ms=800.0,
+    ))
+    t = l.total()
+    # n=3, sum(ttft) = 0 + 300 + 600 = 900, avg = 300
+    assert t.avg_ttft_ms == pytest.approx(300.0)
 

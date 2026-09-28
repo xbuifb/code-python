@@ -229,6 +229,7 @@ class AgentTool(Tool):
             context_window=self._parent_agent.context_window,
             instructions_content=definition.system_prompt,
             hook_engine=self._parent_agent.hook_engine,
+            cost_ledger=getattr(self._parent_agent, "cost_ledger", None),
         )
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
@@ -422,6 +423,7 @@ class AgentTool(Tool):
             context_window=self._parent_agent.context_window,
             instructions_content=instructions,
             hook_engine=self._parent_agent.hook_engine,
+            cost_ledger=getattr(self._parent_agent, "cost_ledger", None),
         )
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
@@ -634,6 +636,7 @@ class AgentTool(Tool):
             context_window=self._parent_agent.context_window,
             instructions_content=definition.system_prompt,
             hook_engine=self._parent_agent.hook_engine,
+            cost_ledger=getattr(self._parent_agent, "cost_ledger", None),
         )
         sub_agent.parent_id = self._parent_agent.agent_id
         sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id

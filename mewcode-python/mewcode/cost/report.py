@@ -28,8 +28,9 @@ def render_text(ledger: CostLedger) -> str:
         f"缓存读 {t.total_cache_read:,} · 缓存写 {t.total_cache_creation:,}"
     )
     lines.append(f"缓存命中率: {t.cache_hit_rate * 100:.1f}%")
-    # TTFT 暂未在 agent.py 主路径测量，等后续接上 first_chunk_perf 后再展示。
-    lines.append(f"平均耗时: {t.avg_duration_ms:.0f} ms")
+    # TTFT：首 token 延迟，反映用户感知到的响应速度
+    lines.append(f"平均首 token 延迟: {t.avg_ttft_ms:.0f} ms")
+    lines.append(f"平均总耗时: {t.avg_duration_ms:.0f} ms")
     if t.unknown_models:
         lines.append(f"未知价格模型: {', '.join(t.unknown_models)}")
     return "\n".join(lines)

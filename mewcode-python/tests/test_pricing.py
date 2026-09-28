@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from mewcode.cost.pricing import compute_cost, price_for
+from mewcode.cost.pricing import Price, compute_cost, price_for
 from mewcode.cost.record import CostRecord
 
 
@@ -28,7 +28,8 @@ def test_price_for_known_model():
 
 
 def test_price_for_unknown_model_returns_none():
-    assert price_for("gpt-4o") is None
+    # gpt-5 在 2025 年公开定价表里未收录
+    assert price_for("gpt-5") is None
 
 
 def test_compute_cost_basic():
@@ -44,5 +45,27 @@ def test_compute_cost_with_cache():
 
 
 def test_compute_cost_unknown_price_returns_none():
-    r = _record("gpt-4o", inp=1000, out=500)
-    assert compute_cost(r, price_for("gpt-4o")) is None
+    r = _record("gpt-5", inp=1000, out=500)
+    assert compute_cost(r, price_for("gpt-5")) is None
+
+
+def test_price_for_gpt4o_and_dated_variants():
+    """GPT-4o 主版本与日期版本都能查到，价格符合 2025 年公开定价。"""
+    assert price_for("gpt-4o") == Price(2.50, 10.0, 1.25, 0.0)
+    assert price_for("gpt-4o-2024-08-06") == Price(2.50, 10.0, 1.25, 0.0)
+    # 早版本定价更高（5/15）测试覆盖
+    assert price_for("gpt-4o-2024-05-13") == Price(5.0, 15.0, 2.50, 0.0)
+
+
+def test_price_for_claude_opus_and_haiku_3():
+    """扩展覆盖 Claude 3 Opus / Haiku / Sonnet 历代模型。"""
+    assert price_for("claude-3-opus").input_per_mtok == 15.0
+    assert price_for("claude-3-haiku").input_per_mtok == 0.25
+    assert price_for("claude-3-sonnet").input_per_mtok == 3.0
+
+
+def test_compute_cost_gpt4o_cache_read():
+    """GPT-4o 输入 1000 + cache_read 500 → 0.0025 + 0.000625 = 0.003125"""
+    r = _record("gpt-4o", inp=1000, out=0, cr=500)
+    p = price_for("gpt-4o")
+    assert compute_cost(r, p) == pytest.approx(0.003125)

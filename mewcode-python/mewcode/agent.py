@@ -574,7 +574,11 @@ class Agent:
             executor = StreamingExecutor()
             deferred_tool_calls: list[ToolCallComplete] = []
             llm_stream = self.client.stream(conversation, system=system, tools=tools)
+            first_chunk_perf: float | None = None
             async for event in collector.consume(llm_stream):
+                # TTFT：首个事件到达即记录（含 stream_text / thinking / tool_use）
+                if first_chunk_perf is None:
+                    first_chunk_perf = time.perf_counter()
                 # 流式工具执行：收到完整 tool_use 就立刻提交执行，不等整个响应结束
                 if isinstance(event, ToolUseEvent):
                     tc = collector.response.tool_calls[-1]
@@ -598,7 +602,7 @@ class Agent:
                 for he in self._drain_hook_events():
                     yield he
 
-            # 记录本次 LLM 调用的成本与耗时（最小闭环：TTFT 暂未实现，填 0.0）
+            # 记录本次 LLM 调用的成本与耗时
             t1 = time.perf_counter()
             try:
                 self.cost_ledger.append(CostRecord(
@@ -608,7 +612,7 @@ class Agent:
                     output_tokens=response.output_tokens,
                     cache_read=response.cache_read,
                     cache_creation=response.cache_creation,
-                    ttft_ms=0.0,
+                    ttft_ms=((first_chunk_perf - t0) * 1000) if first_chunk_perf is not None else 0.0,
                     duration_ms=(t1 - t0) * 1000,
                 ))
             except (AttributeError, TypeError, ValueError) as e:
@@ -1130,10 +1134,30 @@ class Agent:
 
             collector = StreamCollector()
             llm_stream = self.client.stream(conversation, system=system, tools=tools)
+            t0 = time.perf_counter()
+            first_chunk_perf: float | None = None
             async for _event in collector.consume(llm_stream):
-                pass
+                if first_chunk_perf is None:
+                    first_chunk_perf = time.perf_counter()
 
             response = collector.response
+            t1 = time.perf_counter()
+            try:
+                self.cost_ledger.append(CostRecord(
+                    timestamp=time.time(),
+                    model=self.client.model,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    cache_read=response.cache_read,
+                    cache_creation=response.cache_creation,
+                    ttft_ms=((first_chunk_perf - t0) * 1000) if first_chunk_perf is not None else 0.0,
+                    duration_ms=(t1 - t0) * 1000,
+                ))
+            except (AttributeError, TypeError, ValueError) as e:
+                logging.getLogger(__name__).warning(
+                    "cost_ledger.append failed: %s", e, exc_info=False
+                )
+
             self.total_input_tokens += response.input_tokens
             self.total_output_tokens += response.output_tokens
 
