@@ -38,6 +38,10 @@ from mewcode.tools.base import (
 
 class MockLLMClient(LLMClient):
     def __init__(self, responses: list[list[StreamEvent]], yield_control: bool = False) -> None:
+        # 必须设 self.model：agent.py 的 cost_ledger.append 路径读 self.client.model，
+        # 缺失会触发 AttributeError 被 except 静默吞掉，导致 cost 记录从未写入。
+        # 用 claude-3-5-sonnet（内置价格表收录）让端到端 cost 计算可验证。
+        self.model = "claude-3-5-sonnet"
         self._responses = list(responses)
         self._call_index = 0
         self._yield_control = yield_control
@@ -396,6 +400,81 @@ async def test_token_usage_accumulates():
     assert c["usage"][1].output_tokens == 130
     assert c["usage"][2].input_tokens == 600
     assert c["usage"][2].output_tokens == 230
+
+
+@pytest.mark.asyncio
+async def test_cost_ledger_records_single_llm_call():
+    """端到端：agent.run() 跑完后 cost_ledger 应有 1 条记录，成本与手算一致。
+
+    这条测试是 cost 观测主链路的唯一证据：之前 MockLLMClient 没设 self.model，
+    agent.py 的 cost_ledger.append 因 AttributeError 被静默吞掉，cost 记录从未写入。
+    现在修了 MockLLMClient，此测试验证 append 路径真的执行了。
+    """
+    # claude-3-5-sonnet 单价：input $3.0/M, output $15.0/M
+    # 1000 input + 500 output → (3000 + 7500) / 1M = 0.0105
+    client = MockLLMClient([
+        [StreamEnd("end_turn", input_tokens=1000, output_tokens=500)],
+    ])
+    registry = create_default_registry()
+    agent = Agent(client, registry, "anthropic", work_dir=".")
+    conv = ConversationManager()
+    conv.add_user_message("hi")
+
+    async for _ in agent.run(conv):
+        pass
+
+    t = agent.cost_ledger.total()
+    assert t.record_count == 1
+    assert t.total_input == 1000
+    assert t.total_output == 500
+    assert t.total_cost == pytest.approx(0.0105)
+    # agent_id 必须被记录（子 Agent 聚合分桶依赖）
+    rec = agent.cost_ledger._records[0]
+    assert rec.agent_id == agent.agent_id
+    assert rec.model == "claude-3-5-sonnet"
+    # 纯文本回复无 tool call → tool_name 应为 None
+    assert rec.tool_name is None
+    # TTFT 与 duration 应是非负实数（不为 0 证明 perf_counter 计时路径跑了）
+    assert rec.ttft_ms >= 0.0
+    assert rec.duration_ms > 0.0
+
+
+@pytest.mark.asyncio
+async def test_cost_ledger_records_cache_tokens_and_tool_attribution():
+    """端到端：带 cache + tool call 的成本记录应正确归因到 tool_name。
+
+    覆盖 cache_read/cache_creation 计费与 _extract_last_tool_name 归因路径。
+    """
+    # claude-3-5-sonnet: input $3.0/M, output $15.0/M, cache_read $0.30/M, cache_creation $3.75/M
+    # 1000 in + 500 out + 200 cr + 100 cc → (3000 + 7500 + 60 + 375) / 1M = 0.010935
+    client = MockLLMClient([
+        [
+            ToolCallComplete("t1", "ReadFile", {"file_path": "MEWCODE.md"}),
+            StreamEnd("tool_use", input_tokens=1000, output_tokens=500,
+                      cache_read=200, cache_creation=100),
+        ],
+        # 第二轮 end_turn 让 agent 循环终止（第一轮 stop_reason=tool_use 会触发工具执行后继续）
+        [StreamEnd("end_turn", input_tokens=10, output_tokens=5)],
+    ])
+    registry = create_default_registry()
+    agent = Agent(client, registry, "anthropic", work_dir=".")
+    conv = ConversationManager()
+    conv.add_user_message("read the file")
+
+    async for _ in agent.run(conv):
+        pass
+
+    t = agent.cost_ledger.total()
+    assert t.record_count == 2
+    # 第一条记录应归因到 ReadFile（_extract_last_tool_name 取最后一个 tool call）
+    first = agent.cost_ledger._records[0]
+    assert first.tool_name == "ReadFile"
+    assert first.cache_read == 200
+    assert first.cache_creation == 100
+    # 缓存命中率 = total_cache_read / (total_input + total_cache_read + total_cache_creation)
+    # = 200 / (1010 + 200 + 100) = 200 / 1310（两条记录都进分母）
+    assert t.cache_hit_rate == pytest.approx(200 / 1310)
+
 
 @pytest.mark.asyncio
 async def test_plan_mode():

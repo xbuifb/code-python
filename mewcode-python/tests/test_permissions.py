@@ -370,6 +370,9 @@ class TestPermissionChecker:
 
 class MockLLMClient(LLMClient):
     def __init__(self, responses: list[list[StreamEvent]]) -> None:
+        # 与 test_agent.MockLLMClient 同步：必须设 self.model 否则 cost_ledger
+        # 路径会触发 AttributeError 被静默吞掉（见 agent.py cost_ledger.append）。
+        self.model = "claude-3-5-sonnet"
         self._responses = list(responses)
         self._call_index = 0
 

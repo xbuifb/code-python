@@ -242,6 +242,9 @@ class CostLedger:
                 avg_ttft_ms=sum(r.ttft_ms for r in recs) / n,
                 avg_duration_ms=sum(r.duration_ms for r in recs) / n,
             ))
-        # 按成本降序（None 视为 +inf 排前）
-        rows.sort(key=lambda x: (x.total_cost is not None, -(x.total_cost or 0)), reverse=True)
+        # 排序：已知成本按降序排前，未知价格（None）的桶排最后。
+        # key=(is_known, cost)：reverse=True 让 True(已知) 先于 False(未知)，
+        # 已知桶内部按 cost 降序（高成本在前）。注意不要给 cost 取负——
+        # reverse=True 已反转方向，再取负会双重抵消变成升序。
+        rows.sort(key=lambda x: (x.total_cost is not None, x.total_cost or 0), reverse=True)
         return rows

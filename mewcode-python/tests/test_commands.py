@@ -437,6 +437,124 @@ class TestMemoryHandler:
         assert "未初始化" in ui.messages[0]
 
 # ---------------------------------------------------------------------------
+# /cost 命令 handler 测试
+# ---------------------------------------------------------------------------
+
+class TestCostHandler:
+    """覆盖 /cost 命令的 7 个分支：total / by-tool / json / reload /
+    history(无 store) / 未知子命令 / ledger 未注入。
+
+    这些是用户入口的唯一证据——之前 tests/ 里 0 个 handle_cost 测试，
+    7 个分支全未验证。
+    """
+
+    @staticmethod
+    def _make_ledger():
+        from mewcode.cost.ledger import CostLedger
+        from mewcode.cost.record import CostRecord
+        l = CostLedger()
+        l.append(CostRecord(
+            timestamp=1.0, model="claude-3-5-sonnet",
+            input_tokens=1000, output_tokens=500,
+            cache_read=100, cache_creation=200,
+            ttft_ms=42.0, duration_ms=500.0,
+            agent_id="main", tool_name="bash",
+        ))
+        l.append(CostRecord(
+            timestamp=2.0, model="gpt-4o",
+            input_tokens=2000, output_tokens=1000,
+            cache_read=0, cache_creation=0,
+            ttft_ms=88.0, duration_ms=800.0,
+            agent_id="worker-1", tool_name="grep",
+        ))
+        return l
+
+    @pytest.mark.asyncio
+    async def test_cost_total_default(self) -> None:
+        from mewcode.commands.handlers.cost import handle_cost
+        ui = MockUI()
+        ctx = _make_context(args="", ui=ui)
+        ctx.cost_ledger = self._make_ledger()
+        await handle_cost(ctx)
+        assert len(ui.messages) == 1
+        assert "成本与延迟（总览）" in ui.messages[0]
+        assert "记录数: 2" in ui.messages[0]
+        # 两个模型都已知价，应显示 $ 金额而非"未知"
+        assert "$" in ui.messages[0]
+        assert "未知" not in ui.messages[0]
+
+    @pytest.mark.asyncio
+    async def test_cost_by_tool(self) -> None:
+        from mewcode.commands.handlers.cost import handle_cost
+        ui = MockUI()
+        ctx = _make_context(args="by-tool", ui=ui)
+        ctx.cost_ledger = self._make_ledger()
+        await handle_cost(ctx)
+        assert "成本分桶（按 工具）" in ui.messages[0]
+        # 两个 tool_name 都应出现
+        assert "bash" in ui.messages[0]
+        assert "grep" in ui.messages[0]
+
+    @pytest.mark.asyncio
+    async def test_cost_json(self) -> None:
+        import json as _json
+        from mewcode.commands.handlers.cost import handle_cost
+        ui = MockUI()
+        ctx = _make_context(args="json", ui=ui)
+        ctx.cost_ledger = self._make_ledger()
+        await handle_cost(ctx)
+        payload = _json.loads(ui.messages[0])
+        assert set(payload.keys()) == {
+            "total", "by_tool", "by_model", "by_agent", "records"
+        }
+        assert payload["total"]["record_count"] == 2
+        assert len(payload["records"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_cost_reload(self) -> None:
+        from mewcode.commands.handlers.cost import handle_cost
+        ui = MockUI()
+        ctx = _make_context(args="reload", ui=ui)
+        ctx.cost_ledger = self._make_ledger()
+        await handle_cost(ctx)
+        assert "价格表已重载" in ui.messages[0]
+        assert "条模型记录" in ui.messages[0]
+
+    @pytest.mark.asyncio
+    async def test_cost_history_no_store_shows_hint(self) -> None:
+        """store=None（纯内存 ledger）时 /cost history 应给出明确提示，不静默空。"""
+        from mewcode.commands.handlers.cost import handle_cost
+        ui = MockUI()
+        ctx = _make_context(args="history", ui=ui)
+        # _make_ledger 返回的 CostLedger() 无 store 注入
+        ctx.cost_ledger = self._make_ledger()
+        await handle_cost(ctx)
+        assert "成本持久化未启用" in ui.messages[0]
+
+    @pytest.mark.asyncio
+    async def test_cost_unknown_subcommand(self) -> None:
+        from mewcode.commands.handlers.cost import handle_cost
+        ui = MockUI()
+        ctx = _make_context(args="foobar", ui=ui)
+        ctx.cost_ledger = self._make_ledger()
+        await handle_cost(ctx)
+        assert "未知子命令" in ui.messages[0]
+        # 提示里应列出可用子命令
+        assert "by-tool" in ui.messages[0]
+        assert "history" in ui.messages[0]
+
+    @pytest.mark.asyncio
+    async def test_cost_no_ledger_shows_hint(self) -> None:
+        """ledger 未注入（ctx.agent 也无）应提示而非 AttributeError。"""
+        from mewcode.commands.handlers.cost import handle_cost
+        ui = MockUI()
+        ctx = _make_context(args="", ui=ui)
+        # ctx.cost_ledger 默认 None，ctx.agent 也默认 None
+        await handle_cost(ctx)
+        assert "成本账本未启用" in ui.messages[0]
+
+
+# ---------------------------------------------------------------------------
 # 集成测试：register_all_commands
 # ---------------------------------------------------------------------------
 

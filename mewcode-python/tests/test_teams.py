@@ -786,3 +786,162 @@ class TestTeamFileSchema:
         assert (m.agent_id, m.agent_type, m.model, m.worktree_path,
                 m.backend_type, m.is_active, m.joined_at) == \
                ("a1", "worker", "m", "/wt", "in-process", False, 123)
+
+
+# ---------------------------------------------------------------------------
+# 子 Agent cost 聚合端到端：worker ledger → mailbox → lead merge → total
+# ---------------------------------------------------------------------------
+
+class TestCostAggregation:
+    """验证 worker 退出前回传 cost_report、lead drain 邮箱后合并到主 ledger
+    的全链路。这是 multi-agent 场景下 cost 观测的关键证据——之前各组件
+    (to_json / from_json / extend) 有单测，但全链路未拼接，memory 笔记
+    仍把 sub-Agent aggregation 列为"已知限制"。
+    """
+
+    def test_worker_cost_report_merges_into_lead_ledger(self, tmp_path):
+        from mewcode.teams.manager import TeamManager
+        from mewcode.cost.ledger import CostLedger
+        from mewcode.cost.record import CostRecord
+
+        mgr = TeamManager()
+        mgr.create_team(name="cost-team", lead_agent_id="lead-1")
+        mailbox = mgr.get_mailbox(mgr.get_team("cost-team").name)
+        assert mailbox is not None
+
+        # worker 账本：2 条记录（已知价格模型）
+        worker = CostLedger()
+        worker.append(CostRecord(
+            timestamp=1.0, model="claude-3-5-sonnet",
+            input_tokens=1000, output_tokens=500,
+            cache_read=0, cache_creation=0,
+            ttft_ms=10.0, duration_ms=100.0,
+            agent_id="worker-1", tool_name="bash",
+        ))
+        worker.append(CostRecord(
+            timestamp=2.0, model="gpt-4o",
+            input_tokens=2000, output_tokens=1000,
+            cache_read=0, cache_creation=0,
+            ttft_ms=20.0, duration_ms=200.0,
+            agent_id="worker-1", tool_name="grep",
+        ))
+        assert len(worker) == 2
+
+        # worker 退出前把 ledger 序列化写邮箱（与 __main__.py:582 路径一致）
+        mailbox.write(
+            "lead-1",
+            MailboxMessage(
+                from_agent="worker-1",
+                text=worker.to_json(),
+                timestamp="2026-09-28T00:00:00+00:00",
+                type="cost_report",
+            ),
+        )
+
+        # lead 账本：本身已有 1 条记录
+        lead = CostLedger()
+        lead.append(CostRecord(
+            timestamp=0.5, model="claude-3-5-sonnet",
+            input_tokens=500, output_tokens=100,
+            cache_read=0, cache_creation=0,
+            ttft_ms=5.0, duration_ms=50.0,
+            agent_id="lead-1", tool_name=None,
+        ))
+        mgr.register_cost_ledger_sink(lead)
+
+        # drain 触发 _merge_cost_report → from_json → extend
+        notes = mgr.drain_lead_mailbox()
+
+        # cost_report 消息不应出现在 notes（不塞进 LLM context）
+        assert all("cost_report" not in n for n in notes)
+        # lead 账本现在应有 3 条（1 原始 + 2 来自 worker）
+        assert len(lead) == 3
+        t = lead.total()
+        assert t.record_count == 3
+        assert t.total_input == 3500  # 500 + 1000 + 2000
+        assert t.total_output == 1600  # 100 + 500 + 1000
+        # 三个模型/记录都已知价，total_cost 应为非 None 的浮点
+        assert t.total_cost is not None
+        # 手算：lead (500*3+100*15)/1M + sonnet (1000*3+500*15)/1M + gpt-4o (2000*2.5+1000*10)/1M
+        # = (1500+1500)/1M + (3000+7500)/1M + (5000+10000)/1M = 0.003 + 0.0105 + 0.015 = 0.0285
+        assert t.total_cost == pytest.approx(0.0285)
+        # by-agent 分桶应能看到 worker-1 与 lead-1
+        rows = lead.aggregate(by="agent_id")
+        keys = {r.key for r in rows}
+        assert keys == {"lead-1", "worker-1"}
+
+    def test_cost_report_bad_payload_does_not_break_drain(self, tmp_path):
+        """坏 cost_report 消息不应让 drain_lead_mailbox 抛异常中断 team 通知。"""
+        from mewcode.teams.manager import TeamManager
+        from mewcode.cost.ledger import CostLedger
+
+        mgr = TeamManager()
+        mgr.create_team(name="bad-cost-team", lead_agent_id="lead-2")
+        team = mgr.get_team("bad-cost-team")
+        mailbox = mgr.get_mailbox(team.name)
+        assert mailbox is not None
+
+        # 写一条坏 cost_report（非 JSON）
+        mailbox.write(
+            "lead-2",
+            MailboxMessage(
+                from_agent="worker-x",
+                text="not a json payload",
+                timestamp="2026-09-28T00:00:00+00:00",
+                type="cost_report",
+            ),
+        )
+        # 再写一条正常文本消息，验证它仍能进 notes
+        mailbox.write(
+            "lead-2",
+            MailboxMessage(
+                from_agent="worker-y",
+                text="task done",
+                timestamp="2026-09-28T00:00:00+00:00",
+                type="text",
+            ),
+        )
+
+        lead = CostLedger()
+        mgr.register_cost_ledger_sink(lead)
+
+        # drain 不应抛异常
+        notes = mgr.drain_lead_mailbox()
+        # 正常文本消息仍在 notes 里
+        assert any("task done" in n for n in notes)
+        # 坏 cost_report 被跳过，lead 账本仍为空
+        assert len(lead) == 0
+
+    def test_cost_report_without_sink_is_silently_dropped(self, tmp_path):
+        """sink 未注入时 cost_report 消息应被丢弃，不抛异常。"""
+        from mewcode.teams.manager import TeamManager
+        from mewcode.cost.ledger import CostLedger
+        from mewcode.cost.record import CostRecord
+
+        mgr = TeamManager()
+        mgr.create_team(name="no-sink-team", lead_agent_id="lead-3")
+        team = mgr.get_team("no-sink-team")
+        mailbox = mgr.get_mailbox(team.name)
+        assert mailbox is not None
+
+        worker = CostLedger()
+        worker.append(CostRecord(
+            timestamp=1.0, model="claude-3-5-sonnet",
+            input_tokens=100, output_tokens=50,
+            cache_read=0, cache_creation=0,
+            ttft_ms=1.0, duration_ms=10.0,
+            agent_id="w", tool_name=None,
+        ))
+        mailbox.write(
+            "lead-3",
+            MailboxMessage(
+                from_agent="w",
+                text=worker.to_json(),
+                timestamp="2026-09-28T00:00:00+00:00",
+                type="cost_report",
+            ),
+        )
+        # 不调 register_cost_ledger_sink → sink 为 None
+        notes = mgr.drain_lead_mailbox()
+        # 不抛异常，cost_report 被跳过
+        assert all("cost_report" not in n for n in notes)

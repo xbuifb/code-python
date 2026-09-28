@@ -240,7 +240,6 @@ def test_extend_merges_records_skipping_bad_ones():
     l.extend([good, bad, good2])
 
     # bad 被跳过，good + good2 都进账本
-    assert len(l.total().record_count) if False else True  # 占位
     t = l.total()
     assert t.record_count == 2
     assert t.total_input == 300  # 100 + 200
@@ -303,6 +302,40 @@ def test_aggregate_by_tool_groups_by_tool_name():
     assert by_key["grep"].total_tokens == 400  # 2 × 200
     assert by_key["(no tool)"].record_count == 1
     assert by_key["(no tool)"].total_tokens == 50
+
+
+def test_aggregate_sort_known_descending_unknown_last():
+    """aggregate 返回行按已知成本降序排前、未知价格桶排最后。
+
+    之前注释写"None 视为 +inf 排前"与实现矛盾（实际 None 排后），
+    且无测试覆盖排序。此测试钉死实际行为：已知桶降序，未知桶末尾。
+    """
+    from mewcode.cost.record import CostRecord
+
+    l = CostLedger()
+    # 三桶：gpt-5 未知价、gpt-4o $0.025、sonnet 高成本
+    l.append(CostRecord(
+        timestamp=0.0, model="gpt-5", input_tokens=100, output_tokens=0,
+        cache_read=0, cache_creation=0, ttft_ms=0.0, duration_ms=0.0,
+    ))  # 未知 → None
+    l.append(CostRecord(
+        timestamp=0.0, model="gpt-4o", input_tokens=1000, output_tokens=0,
+        cache_read=0, cache_creation=0, ttft_ms=0.0, duration_ms=0.0,
+    ))  # (1000*2.5)/1M = 0.0025
+    l.append(CostRecord(
+        timestamp=0.0, model="claude-3-5-sonnet", input_tokens=10000, output_tokens=5000,
+        cache_read=0, cache_creation=0, ttft_ms=0.0, duration_ms=0.0,
+    ))  # (30000+75000)/1M = 0.105
+
+    rows = l.aggregate(by="model")
+    assert len(rows) == 3
+    # 期望顺序：sonnet(0.105) > gpt-4o(0.0025) > gpt-5(None 末尾)
+    assert rows[0].key == "claude-3-5-sonnet"
+    assert rows[0].total_cost == pytest.approx(0.105)
+    assert rows[1].key == "gpt-4o"
+    assert rows[1].total_cost == pytest.approx(0.0025)
+    assert rows[2].key == "gpt-5"
+    assert rows[2].total_cost is None  # 未知价排最后
 
 
 # ---------------------------------------------------------------------------
