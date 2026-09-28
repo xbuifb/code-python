@@ -614,6 +614,7 @@ class Agent:
                     cache_creation=response.cache_creation,
                     ttft_ms=((first_chunk_perf - t0) * 1000) if first_chunk_perf is not None else 0.0,
                     duration_ms=(t1 - t0) * 1000,
+                    agent_id=self.agent_id,
                 ))
             except (AttributeError, TypeError, ValueError) as e:
                 # 观测不能阻断主流程，但必须留痕，否则静默失败比不观测更糟
@@ -1152,6 +1153,7 @@ class Agent:
                     cache_creation=response.cache_creation,
                     ttft_ms=((first_chunk_perf - t0) * 1000) if first_chunk_perf is not None else 0.0,
                     duration_ms=(t1 - t0) * 1000,
+                    agent_id=self.agent_id,
                 ))
             except (AttributeError, TypeError, ValueError) as e:
                 logging.getLogger(__name__).warning(

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from mewcode.cost.record import CostRecord
 
@@ -23,7 +26,7 @@ class Price:
 # 覆盖 Anthropic / OpenAI 主流模型，按 2025 年公开定价表（USD / 1M token）。
 # Anthropic cache_read ≈ input × 0.1，cache_creation ≈ input × 1.25。
 # OpenAI 系列 cache_creation 固定 0（自动 prompt caching 不额外收费）。
-_PRICING_TABLE: dict[str, Price] = {
+_DEFAULT_PRICING: dict[str, Price] = {
     # Anthropic Claude 系列
     "claude-3-5-sonnet": Price(3.0, 15.0, 0.30, 3.75),
     "claude-3-5-sonnet-20241022": Price(3.0, 15.0, 0.30, 3.75),
@@ -42,6 +45,49 @@ _PRICING_TABLE: dict[str, Price] = {
     "gpt-4o-mini-2024-07-18": Price(0.15, 0.60, 0.075, 0.0),
     "gpt-4-turbo": Price(10.0, 30.0, 5.0, 0.0),
 }
+
+
+def _load_user_pricing() -> dict[str, Price]:
+    """从 ~/.mewcode/pricing.yaml 加载用户自定义价格表。
+
+    失败（文件不存在 / PyYAML 未安装 / 解析失败 / 字段缺失）一律返回空表，
+    绝不阻断启动 — 观测系统不能让价格表加载失败拖垮整个 Agent。
+    """
+    log = logging.getLogger(__name__)
+    try:
+        path = Path.home() / ".mewcode" / "pricing.yaml"
+        if not path.exists():
+            return {}
+        try:
+            import yaml
+        except ImportError:
+            log.warning("PyYAML 未安装，跳过 %s 加载", path)
+            return {}
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        result: dict[str, Price] = {}
+        for model, entry in data.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                result[str(model)] = Price(
+                    input_per_mtok=float(entry["input_per_mtok"]),
+                    output_per_mtok=float(entry["output_per_mtok"]),
+                    cache_read_per_mtok=float(entry.get("cache_read_per_mtok", 0.0)),
+                    cache_creation_per_mtok=float(entry.get("cache_creation_per_mtok", 0.0)),
+                )
+            except (KeyError, TypeError, ValueError):
+                log.warning("跳过坏条目: %s", model)
+                continue
+        log.info("从 %s 加载了 %d 条价格", path, len(result))
+        return result
+    except Exception as e:
+        log.warning("加载用户价格表失败，回退默认表: %s", e)
+        return {}
+
+
+# 启动时合并：用户表覆盖同名模型，新增模型追加
+_PRICING_TABLE: dict[str, Price] = {**_DEFAULT_PRICING, **_load_user_pricing()}
 
 
 def price_for(model: str) -> Price | None:

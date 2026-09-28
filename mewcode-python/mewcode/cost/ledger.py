@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Literal
 
 from mewcode.cost.pricing import compute_cost, price_for
 from mewcode.cost.record import CostRecord
@@ -24,6 +26,18 @@ class LedgerTotal:
     avg_duration_ms: float
     total_cost: float | None
     unknown_models: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AggregateRow:
+    """分桶聚合行：按 tool/model/agent_id 任一维度切片后的单行结果。"""
+
+    key: str
+    record_count: int
+    total_tokens: int
+    total_cost: float | None
+    avg_ttft_ms: float
+    avg_duration_ms: float
 
 
 class CostLedger:
@@ -98,3 +112,55 @@ class CostLedger:
             total_cost=cost_sum,
             unknown_models=unknown_models,
         )
+
+    def aggregate(
+        self,
+        by: Literal["tool", "model", "agent_id"],
+    ) -> list[AggregateRow]:
+        """按维度分桶聚合。
+
+        by="tool" 按 tool_name（None 归到 "(no tool)" 桶）；
+        by="model" 按模型名；
+        by="agent_id" 按 agent_id。
+        每行返回该桶的记录数、token 总数、成本（桶内任一未知则 None）、
+        平均 TTFT、平均 duration。
+        """
+        if not self._records:
+            return []
+
+        buckets: dict[str, list[CostRecord]] = defaultdict(list)
+        for r in self._records:
+            if by == "tool":
+                key = r.tool_name if r.tool_name else "(no tool)"
+            elif by == "model":
+                key = r.model
+            elif by == "agent_id":
+                key = r.agent_id
+            else:
+                raise ValueError(f"unsupported aggregation key: {by}")
+            buckets[key].append(r)
+
+        rows: list[AggregateRow] = []
+        for key, recs in buckets.items():
+            n = len(recs)
+            total_tokens = sum(r.input_tokens + r.output_tokens for r in recs)
+            # 桶内任一记录价格未知 → total_cost = None
+            cost: float | None = 0.0
+            for r in recs:
+                price = price_for(r.model)
+                if price is None:
+                    cost = None
+                    break
+                if cost is not None:
+                    cost += compute_cost(r, price)
+            rows.append(AggregateRow(
+                key=key,
+                record_count=n,
+                total_tokens=total_tokens,
+                total_cost=cost,
+                avg_ttft_ms=sum(r.ttft_ms for r in recs) / n,
+                avg_duration_ms=sum(r.duration_ms for r in recs) / n,
+            ))
+        # 按成本降序（None 视为 +inf 排前）
+        rows.sort(key=lambda x: (x.total_cost is not None, -(x.total_cost or 0)), reverse=True)
+        return rows
