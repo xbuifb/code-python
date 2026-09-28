@@ -32,6 +32,9 @@ class CommandContext:
     memory_manager: Any
     ui: UIController
     config: Any
+    # cost 系统注入：让 /cost 命令直接访问主 Agent 的 cost_ledger，
+    # 无需走 getattr 兜底。无 cost 系统时由构造点传 None。
+    cost_ledger: Any = None
 
 
 CommandHandler = Callable[[CommandContext], Awaitable[None]]

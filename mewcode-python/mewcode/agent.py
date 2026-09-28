@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator, Callable
 from pydantic import ValidationError
 
 from mewcode.client import LLMClient
-from mewcode.cost import CostLedger, CostRecord
+from mewcode.cost import CostLedger, CostRecord, CostStore
 from mewcode.context import (
     CompactBoundary,
     CompactCircuitBreaker,
@@ -334,9 +334,12 @@ class Agent:
         self.recovery_state: RecoveryState = RecoveryState()
         self.total_input_tokens = 0
         self.total_output_tokens = 0
-        # 成本账本：默认自建本地实例；子 Agent 可显式传入主 ledger
-        # 实现聚合（最小闭环暂未实现该路径）。
-        self.cost_ledger = cost_ledger or CostLedger()
+        # 成本账本：默认自建本地实例并绑定 CostStore 落盘（Stage 7 跨会话持久化）；
+        # 子 Agent 可显式传入主 ledger 实现聚合，此时复用其 store 配置不再覆盖。
+        if cost_ledger is not None:
+            self.cost_ledger = cost_ledger
+        else:
+            self.cost_ledger = CostLedger(store=CostStore(work_dir))
         self.instructions_content = instructions_content
         self.memory_manager = memory_manager
         self.hook_engine = hook_engine
@@ -350,7 +353,7 @@ class Agent:
         if memory_manager is not None:
             from mewcode.memory.consolidation import MemoryConsolidator
             self._consolidator = MemoryConsolidator(work_dir)
-        self.session_id: str = ""
+        self._session_id: str = ""
         self.active_skills: dict[str, str] = {}
         self._skill_catalog: str = ""
         self._agent_catalog: str = ""
@@ -368,6 +371,18 @@ class Agent:
         # 非阻塞 memory recall：prefetch task 与主 LLM 调用并行，工具执行后注入
         self.memory_recall_task: Any | None = None
         self._memory_recall_consumed: bool = False
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        # 同步到 cost ledger，使其 append 能落盘到正确的 session 文件
+        # （Stage 7 跨会话持久化）。cost_ledger 在 __init__ 早于 _session_id 设置，
+        # 此处可安全访问。
+        self._session_id = value
+        self.cost_ledger.session_id = value
 
     @property
     def session_dir(self) -> Path:

@@ -643,6 +643,7 @@ class RemoteServer:
             config={
                 "registry": self.command_registry,
             },
+            cost_ledger=getattr(self.agent, "cost_ledger", None) if self.agent else None,
         )
 
     async def _handle_compact(self) -> None:

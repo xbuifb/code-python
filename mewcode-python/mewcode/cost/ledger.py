@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from mewcode.cost.pricing import compute_cost, price_for
 from mewcode.cost.record import CostRecord
+
+if TYPE_CHECKING:
+    from mewcode.cost.store import CostStore
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,8 +54,16 @@ class CostLedger:
     回传时再考虑锁或独立 ledger + merge。
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        store: "CostStore | None" = None,
+        session_id: str = "",
+    ) -> None:
         self._records: list[CostRecord] = []
+        # Stage 7: 跨会话持久化。store 为 None 时退化为纯内存模式
+        # （测试 / 早期入口未注入 CostStore 的兜底路径）。
+        self._store = store
+        self.session_id = session_id
 
     def append(self, record: CostRecord) -> None:
         # 防御性校验：观测数据污染比丢数据更糟，负数 token 拒收。
@@ -58,6 +72,13 @@ class CostLedger:
         if record.cache_read < 0 or record.cache_creation < 0:
             raise ValueError(f"negative cache token count: {record}")
         self._records.append(record)
+        # 持久化失败不阻断主流程：内存账本已记录，磁盘缺失只是历史查询
+        # 少一条，比让 LLM 调用因观测落盘失败而中断更可接受。
+        if self._store is not None:
+            try:
+                self._store.append(record, self.session_id)
+            except (OSError, TypeError, ValueError) as e:
+                log.warning("cost 持久化失败: %s", e, exc_info=False)
 
     def extend(self, records: list[CostRecord]) -> None:
         """批量 append，用于跨进程 cost_report 合并。
@@ -116,6 +137,11 @@ class CostLedger:
 
     def __len__(self) -> int:
         return len(self._records)
+
+    @property
+    def store(self) -> "CostStore | None":
+        """暴露底层 CostStore，供 /cost history 命令查询历史。"""
+        return self._store
 
     def total(self) -> LedgerTotal:
         n = len(self._records)

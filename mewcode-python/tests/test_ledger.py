@@ -304,3 +304,71 @@ def test_aggregate_by_tool_groups_by_tool_name():
     assert by_key["(no tool)"].record_count == 1
     assert by_key["(no tool)"].total_tokens == 50
 
+
+# ---------------------------------------------------------------------------
+# Stage 7: CostStore 持久化注入
+# ---------------------------------------------------------------------------
+
+
+def test_ledger_without_store_is_in_memory_only():
+    """store=None 时 ledger 退化为纯内存模式，append 不落盘。"""
+    l = CostLedger()  # 默认无 store
+    assert l.store is None
+    l.append(_record("claude-3-5-sonnet", inp=100, out=0))
+    assert len(l) == 1
+
+
+def test_ledger_with_store_persists_on_append(tmp_path):
+    """注入 store 后 append 应同时落盘到 session 文件。"""
+    from mewcode.cost.store import CostStore
+
+    store = CostStore(str(tmp_path))
+    l = CostLedger(store=store, session_id="sess-test")
+
+    l.append(_record("claude-3-5-sonnet", inp=1000, out=500))
+
+    # 内存账本有记录
+    assert len(l) == 1
+    # 磁盘也持久化了
+    loaded = store.load_session("sess-test")
+    assert len(loaded) == 1
+    assert loaded[0].model == "claude-3-5-sonnet"
+    assert loaded[0].input_tokens == 1000
+
+
+def test_ledger_session_id_update_syncs_to_store(tmp_path):
+    """更新 ledger.session_id 后新 append 走新 session 文件。"""
+    from mewcode.cost.store import CostStore
+
+    store = CostStore(str(tmp_path))
+    l = CostLedger(store=store, session_id="")
+
+    # 初始 session_id 为空，不落盘
+    l.append(_record("claude-3-5-sonnet", inp=100, out=0))
+    assert store.load_session("") == []
+
+    # 切换 session_id
+    l.session_id = "real-session"
+    l.append(_record("claude-3-5-sonnet", inp=200, out=0))
+
+    loaded = store.load_session("real-session")
+    assert len(loaded) == 1
+    assert loaded[0].input_tokens == 200
+
+
+def test_ledger_store_append_failure_does_not_block(tmp_path):
+    """store.append 失败不应阻断 ledger.append（内存账本仍保留记录）。"""
+    from mewcode.cost.store import CostStore
+    from unittest.mock import patch
+
+    store = CostStore(str(tmp_path))
+    l = CostLedger(store=store, session_id="sess-1")
+
+    # 让 store.append 抛 OSError，模拟磁盘满 / 权限错误
+    with patch.object(store, "append", side_effect=OSError("disk full")):
+        l.append(_record("claude-3-5-sonnet", inp=100, out=0))
+
+    # 内存账本仍有记录，主流程未被阻断
+    assert len(l) == 1
+
+

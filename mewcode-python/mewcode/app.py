@@ -1054,6 +1054,7 @@ class MewCodeApp(App):
                 "skill_loader": self.skill_loader,
                 "skill_executor": self.skill_executor,
             },
+            cost_ledger=getattr(self.agent, "cost_ledger", None) if self.agent else None,
         )
 
     def _set_session(self, session: Session) -> None:
